@@ -1,0 +1,118 @@
+==============================================================================
+GUIDE: REDIS CACHING FOR MENU READS
+==============================================================================
+
+1. OVERVIEW
+------------------------------------------------------------------------------
+Menu reads happen frequently (hundreds of times per second during peak hours), whereas vendors update menus infrequently.
+Using Redis with the Cache-Aside pattern significantly reduces database load and speeds up API response times (<10ms).
+
+
+2. REDIS CONNECTION SETUP
+------------------------------------------------------------------------------
+Install `redis` async client (`uv add redis`):
+
+```python
+# app/core/redis.py
+import redis.asyncio as aioredis
+from app.core.config import settings # your settings module
+
+redis_client: aioredis.Redis | None = None
+
+async def init_redis():
+    global redis_client
+    redis_client = aioredis.from_url(
+        settings.REDIS_URL, # e.g. "redis://localhost:6379/0"
+        encoding="utf-8",
+        decode_responses=True
+    )
+
+async def close_redis():
+    global redis_client
+    if redis_client:
+        await redis_client.close()
+```
+
+Register lifespan in `app/main.py`:
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_redis()
+    yield
+    await close_redis()
+```
+
+
+3. CACHE-ASIDE PATTERN IMPLEMENTATION
+------------------------------------------------------------------------------
+When fetching a restaurant's menu:
+1. Check if cache exists in Redis (`GET menu:restaurant:{restaurant_id}`).
+2. If HIT: parse JSON string and return immediately.
+3. If MISS: query DB, serialize result to JSON, store in Redis with TTL (e.g. 15 mins), and return.
+
+```python
+# app/customers/services.py (or app/vendors/services.py)
+import json
+from app.core.redis import redis_client
+from app.vendors.schemas import PaginatedMenusResponse
+
+MENU_CACHE_TTL = 900  # 15 minutes in seconds
+
+async def get_cached_restaurant_menus(
+    restaurant_id: int, skip: int, limit: int, db: AsyncSession
+) -> dict:
+    cache_key = f"menu:restaurant:{restaurant_id}:skip:{skip}:limit:{limit}"
+
+    # 1. Check Redis cache
+    if redis_client:
+        cached_data = await redis_client.get(cache_key)
+        if cached_data:
+            return json.loads(cached_data)
+
+    # 2. Cache MISS: Query PostgreSQL database
+    count_res = await db.execute(select(func.count()).select_from(Menu).where(Menu.restaurant_id == restaurant_id))
+    total = count_res.scalar() or 0
+
+    res = await db.execute(
+        select(Menu)
+        .options(selectinload(Menu.menus_options).selectinload(MenuOptionGroup.options))
+        .where(Menu.restaurant_id == restaurant_id)
+        .offset(skip)
+        .limit(limit)
+    )
+    menus = res.scalars().all()
+
+    response_obj = PaginatedMenusResponse(
+        menus=[MenuResponse.model_validate(m) for m in menus],
+        total=total, skip=skip, limit=limit, has_more=(skip + len(menus) < total)
+    ).model_dump(mode="json")
+
+    # 3. Write to Redis cache with expiration
+    if redis_client:
+        await redis_client.setex(cache_key, MENU_CACHE_TTL, json.dumps(response_obj))
+
+    return response_obj
+```
+
+
+4. CACHE INVALIDATION ON VENDOR MUTATIONS
+------------------------------------------------------------------------------
+Whenever a vendor creates, updates, or deletes a menu or option group, invalidate all menu cache keys for that restaurant:
+
+```python
+async def invalidate_restaurant_menu_cache(restaurant_id: int):
+    if redis_client:
+        # Find all keys matching restaurant menu cache pattern
+        keys = await redis_client.keys(f"menu:restaurant:{restaurant_id}:*")
+        if keys:
+            await redis_client.delete(*keys)
+
+# Call in vendor routes:
+@router.post("/{restaurant_id}/menus")
+async def create_menu(...):
+    # ... create menu logic ...
+    await invalidate_restaurant_menu_cache(restaurant_id)
+    return new_menu
+```
+
+==============================================================================

@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: food_delivery_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: food_delivery_db
+    volumes:
+      # Persists DB data between container restarts
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Expose DB on host so you can still connect with DBeaver/psql locally
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d food_delivery_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: food_delivery_app
+    restart: unless-stopped
+    env_file:
+      # Loads all your .env variables (secrets, mail, AWS, etc.)
+      - .env
+    environment:
+      # Override DATABASE_URL: replace 'localhost' with the db service name
+      # Inside Docker, containers talk to each other by service name, not localhost
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db/food_delivery_db
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        # Wait until Postgres is actually ready before starting the app
+        condition: service_healthy
+
+volumes:
+  postgres_data:

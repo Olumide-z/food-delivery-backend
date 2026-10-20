@@ -1,0 +1,146 @@
+==============================================================================
+                    AWS S3 BUCKET & CREDENTIALS SETUP GUIDE
+==============================================================================
+
+This guide covers step-by-step instructions on:
+1. Creating an AWS S3 Bucket
+2. Configuring Bucket Policy and CORS for public image access
+3. Creating an IAM User to get Access Key ID and Secret Access Key
+4. Updating your project environment variables (.env)
+
+
+==============================================================================
+PART 1: HOW TO CREATE AN AWS S3 BUCKET
+==============================================================================
+
+1. Sign in to AWS Console:
+   - Go to https://aws.amazon.com/console/ and log in.
+
+2. Open S3 Service:
+   - Search for "S3" in the top search bar and click "S3".
+
+3. Create Bucket:
+   - Click the orange "Create bucket" button.
+
+4. General Configuration:
+   - Bucket Name: Enter a unique name (e.g., food-delivery-app-bucket-2026).
+     * Note: S3 bucket names must be globally unique across all AWS accounts.
+   - AWS Region: Select your region (e.g., us-east-1 or eu-west-1).
+
+5. Object Ownership:
+   - Keep default: "ACLs disabled (recommended)".
+
+6. Block Public Access Settings for this bucket:
+   - To allow public web access to uploaded images (so customers/vendors can view image URLs in browser/app):
+     a. Uncheck "Block all public access".
+     b. Check the warning checkbox acknowledging that the bucket will become public.
+
+7. Bucket Versioning & Encryption:
+   - Keep defaults (Versioning: Disable, Encryption: Server-side encryption with SSE-S3).
+
+8. Finalize:
+   - Scroll down to the bottom and click "Create bucket".
+
+
+==============================================================================
+PART 2: CONFIGURE S3 BUCKET POLICY & CORS
+==============================================================================
+
+--- A. BUCKET POLICY (To make uploaded images publicly readable) ---
+1. Click on your newly created bucket name from the S3 bucket list.
+2. Go to the "Permissions" tab.
+3. Scroll down to "Bucket policy" and click "Edit".
+4. Paste the following JSON policy (replace YOUR_BUCKET_NAME with your bucket's name):
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "PublicReadGetObject",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/*"
+        }
+    ]
+}
+
+5. Click "Save changes".
+
+
+--- B. CORS CONFIGURATION (If uploading from frontend web app) ---
+1. In the same "Permissions" tab, scroll down to "Cross-origin resource sharing (CORS)".
+2. Click "Edit".
+3. Paste the following JSON:
+
+[
+    {
+        "AllowedHeaders": [
+            "*"
+        ],
+        "AllowedMethods": [
+            "GET",
+            "PUT",
+            "POST",
+            "DELETE"
+        ],
+        "AllowedOrigins": [
+            "*"
+        ],
+        "ExposedHeaders": []
+    }
+]
+
+4. Click "Save changes".
+
+
+==============================================================================
+PART 3: HOW TO GET AWS ACCESS KEY & SECRET ACCESS KEY (IAM USER)
+==============================================================================
+
+1. Open IAM Service:
+   - In the top AWS search bar, type "IAM" and select "IAM".
+
+2. Create User:
+   - Click "Users" in the left sidebar menu.
+   - Click the orange "Create user" button.
+   - Username: Enter a name (e.g., food-delivery-s3-user).
+   - Do NOT check "Provide user access to the AWS Management Console" (this is a programmatic service user).
+   - Click "Next".
+
+3. Set Permissions:
+   - Select "Attach policies directly".
+   - In the search bar under Permission policies, search for: AmazonS3FullAccess
+   - Check the box next to AmazonS3FullAccess.
+   - Click "Next".
+   - Click "Create user".
+
+4. Generate Access Keys:
+   - Click on the newly created username (e.g., food-delivery-s3-user) from the users list.
+   - Click on the "Security credentials" tab.
+   - Scroll down to the "Access keys" section.
+   - Click "Create access key".
+   - Choose use case: Select "Application running outside AWS" or "Command Line Interface (CLI)".
+   - Click "Next".
+   - (Optional) Add description tag e.g. "Backend S3 integration".
+   - Click "Create access key".
+
+5. SAVE YOUR KEYS IMMEDIATELY:
+   - You will see:
+     * Access key ID (looks like: AKIAIOSFODNN7EXAMPLE)
+     * Secret access key (looks like: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY)
+   - Click "Download .csv file" or copy both keys to a secure location.
+   - WARNING: The Secret Access Key will NEVER be displayed again after you leave this page!
+
+
+==============================================================================
+PART 4: ADD CREDENTIALS TO YOUR PROJECT (.env)
+==============================================================================
+
+Add the key credentials to your project's .env file:
+
+AWS_ACCESS_KEY_ID=AKIA...your_access_key_id_here
+AWS_SECRET_ACCESS_KEY=your_secret_access_key_here
+AWS_REGION=us-east-1
+AWS_S3_BUCKET_NAME=your-s3-bucket-name
+==============================================================================

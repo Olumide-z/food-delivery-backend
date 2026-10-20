@@ -1,0 +1,47 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables (never bake secrets into image)
+.env
+.env.*
+
+# Version control
+.git/
+.gitignore
+
+# Test files and coverage
+tests/
+.pytest_cache/
+.coverage
+.coveragerc
+pytest.ini
+
+# Logs
+*.log
+log.log
+app.log
+
+# Documentation & misc
+*.md
+*.txt
+AWS_S3_SETUP_GUIDE.txt
+
+# Database migrations (run separately, not at container startup)
+# Comment out if your entrypoint runs migrations
+# migrations/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

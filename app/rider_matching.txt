@@ -1,0 +1,125 @@
+==============================================================================
+GUIDE: RIDER MATCHING USING HAVERSINE FORMULA
+==============================================================================
+
+1. OVERVIEW
+------------------------------------------------------------------------------
+When an order is marked as READY_FOR_PICKUP by a vendor, the system matches and assigns the nearest online and available rider.
+We calculate geographical distance between the restaurant's coordinates (latitude, longitude) and available riders' current coordinates using the Haversine formula.
+
+
+2. HAVERSINE DISTANCE ALGORITHM
+------------------------------------------------------------------------------
+The Haversine formula calculates the great-circle distance between two points on Earth given their longitudes and latitudes.
+
+```python
+# app/utils/geo.py
+import math
+
+def calculate_haversine_distance(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    """
+    Calculates distance in kilometers between two GPS coordinates.
+    """
+    R = 6371.0  # Earth radius in kilometers
+
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    distance = R * c
+    return distance  # Returns distance in km
+```
+
+
+3. RIDER MATCHING SERVICE
+------------------------------------------------------------------------------
+Find the nearest available rider within a maximum search radius (e.g., 5.0 km) and assign them to the order.
+
+```python
+# app/riders/services.py
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models.rider import RiderProfile  # assumes rider model exists
+from app.models.order import Order
+from app.utils.geo import calculate_haversine_distance
+
+async def match_nearest_rider(
+    restaurant_lat: float,
+    restaurant_lng: float,
+    order_id: int,
+    db: AsyncSession,
+    max_radius_km: float = 5.0
+) -> RiderProfile | None:
+    # 1. Fetch all online and available riders
+    result = await db.execute(
+        select(RiderProfile).where(
+            RiderProfile.is_online == True,
+            RiderProfile.is_available == True
+        )
+    )
+    available_riders = result.scalars().all()
+
+    if not available_riders:
+        return None
+
+    nearest_rider = None
+    min_distance = float("inf")
+
+    # 2. Iterate and find closest rider within radius
+    for rider in available_riders:
+        if rider.current_latitude is None or rider.current_longitude is None:
+            continue
+
+        dist = calculate_haversine_distance(
+            restaurant_lat, restaurant_lng,
+            rider.current_latitude, rider.current_longitude
+        )
+
+        if dist <= max_radius_km and dist < min_distance:
+            min_distance = dist
+            nearest_rider = rider
+
+    # 3. Assign rider to order and mark rider as busy
+    if nearest_rider:
+        nearest_rider.is_available = False
+        order_res = await db.execute(select(Order).where(Order.id == order_id))
+        order = order_res.scalars().first()
+        if order:
+            order.rider_id = nearest_rider.id
+            order.status = "RIDER_ASSIGNED"
+        await db.commit()
+
+    return nearest_rider
+```
+
+
+4. TRIGGERING MATCHING FROM VENDOR DISPATCH
+------------------------------------------------------------------------------
+Call `match_nearest_rider` when the vendor accepts the order or marks it ready:
+
+```python
+@router.post("/orders/{order_id}/ready")
+async def mark_order_ready(order_id: int, db: AsyncSession):
+    # Fetch restaurant coordinates...
+    rider = await match_nearest_rider(
+        restaurant_lat=restaurant.latitude,
+        restaurant_lng=restaurant.longitude,
+        order_id=order_id,
+        db=db
+    )
+    if not rider:
+        # Fallback: Notify vendor that no riders are currently in range
+        return {"message": "Order marked ready, searching for riders..."}
+    return {"message": f"Assigned to rider {rider.id}"}
+```
+
+==============================================================================

@@ -1,0 +1,105 @@
+==============================================================================
+GUIDE: WEBSOCKET FOR LIVE ORDER STATUS
+==============================================================================
+
+1. OVERVIEW
+------------------------------------------------------------------------------
+WebSockets enable real-time, two-way communication between the server and the customer client.
+When a vendor updates an order status (e.g. PENDING -> PREPARING -> READY) or a rider updates their GPS location, the server broadcasts JSON messages directly to connected WebSocket clients watching that specific order.
+
+
+2. ARCHITECTURE & CONNECTION MANAGER
+------------------------------------------------------------------------------
+Create a connection manager to maintain active WebSocket connections grouped by order_id:
+
+```python
+# app/core/websockets.py
+from fastapi import WebSocket
+from typing import Dict, List
+
+class OrderConnectionManager:
+    def __init__(self):
+        # Maps order_id -> list of active WebSockets (customer, vendor, admin)
+        self.active_connections: Dict[int, List[WebSocket]] = {}
+
+    async def connect(self, order_id: int, websocket: WebSocket):
+        await websocket.accept()
+        if order_id not in self.active_connections:
+            self.active_connections[order_id] = []
+        self.active_connections[order_id].append(websocket)
+
+    def disconnect(self, order_id: int, websocket: WebSocket):
+        if order_id in self.active_connections:
+            self.active_connections[order_id].remove(websocket)
+            if not self.active_connections[order_id]:
+                del self.active_connections[order_id]
+
+    async def broadcast_to_order(self, order_id: int, message: dict):
+        if order_id in self.active_connections:
+            for connection in self.active_connections[order_id]:
+                await connection.send_json(message)
+
+order_ws_manager = OrderConnectionManager()
+```
+
+
+3. FASTAPI WEBSOCKET ENDPOINT
+------------------------------------------------------------------------------
+Define a WebSocket endpoint requiring JWT authentication via query parameter (e.g. ws://localhost:8000/api/v1/customers/ws/orders/123?token=<JWT_TOKEN>):
+
+```python
+# app/customers/routes.py (or app/orders/routes.py)
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
+from app.core.websockets import order_ws_manager
+from app.core.security import decode_access_token # your JWT token helper
+
+@router.websocket("/ws/orders/{order_id}")
+async def order_live_tracking_ws(
+    websocket: WebSocket,
+    order_id: int,
+    token: str = Query(...)
+):
+    # 1. Authenticate user from query token
+    user = await decode_access_token(token)
+    if not user:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # 2. Connect client WebSocket to order room
+    await order_ws_manager.connect(order_id, websocket)
+    try:
+        # Keep connection open and handle incoming client pings/messages
+        while True:
+            data = await websocket.receive_text()
+            # Optional: handle client heartbeat or commands
+    except WebSocketDisconnect:
+        order_ws_manager.disconnect(order_id, websocket)
+```
+
+
+4. BROADCASTING STATUS UPDATES FROM VENDOR/RIDER ROUTES
+------------------------------------------------------------------------------
+Whenever a vendor updates an order status or a rider updates location coordinates, trigger the broadcast:
+
+```python
+# In vendor or rider update route endpoint:
+@router.patch("/orders/{order_id}/status")
+async def update_order_status(order_id: int, new_status: str, db: AsyncSession):
+    # Update DB order status...
+    order.status = new_status
+    await db.commit()
+
+    # Broadcast update to connected customer frontend WebSocket
+    await order_ws_manager.broadcast_to_order(
+        order_id=order.id,
+        message={
+            "event": "ORDER_STATUS_UPDATED",
+            "order_id": order.id,
+            "status": order.status,
+            "updated_at": str(order.updated_at)
+        }
+    )
+    return {"message": "Status updated"}
+```
+
+==============================================================================

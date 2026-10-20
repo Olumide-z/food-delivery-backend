@@ -1,0 +1,14 @@
+[run]
+concurrency = greenlet
+omit =
+    # Empty service scaffolding — no logic yet, tests added as features are built
+    app/auth/services.py
+    app/customers/services.py
+    app/vendors/services.py
+    app/riders/services.py
+    # Placeholder schemas with no routes calling them yet
+    app/customers/schemas.py
+    app/vendors/schemas.py
+    app/riders/schemas.py
+    # Email utility — tested indirectly via mocks in auth tests
+    app/utils/emails.py

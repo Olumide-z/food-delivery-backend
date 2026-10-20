@@ -1,0 +1,119 @@
+==============================================================================
+GUIDE: BACKGROUND JOBS FOR AUTO-CANCEL & NOTIFICATIONS
+==============================================================================
+
+1. OVERVIEW
+------------------------------------------------------------------------------
+Background tasks prevent blocking HTTP request-response cycles.
+Two key use cases in food delivery:
+1. Immediate Background Tasks: Sending push/email notifications right after an action.
+2. Scheduled Cron Jobs: Auto-canceling pending orders that vendors failed to accept within 15 minutes.
+
+
+2. IMMEDIATE BACKGROUND TASKS (FastAPI BackgroundTasks)
+------------------------------------------------------------------------------
+FastAPI provides a built-in `BackgroundTasks` object to send emails/notifications in the background after the HTTP response returns.
+
+```python
+# app/services/notification.py
+async def send_order_confirmation_email(customer_email: str, order_id: int):
+    # Simulate sending email via SendGrid, Mailgun, or SMTP
+    print(f"Sending confirmation email for Order #{order_id} to {customer_email}")
+
+# In customer order placement route:
+from fastapi import BackgroundTasks
+
+@router.post("/orders")
+async def place_order(
+    order_data: OrderCreate,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_customer),
+    db: AsyncSession = Depends(get_db)
+):
+    # 1. Create order in DB...
+    new_order = await create_order_in_db(order_data, current_user.id, db)
+
+    # 2. Queue background email notification without delaying HTTP response
+    background_tasks.add_task(
+        send_order_confirmation_email,
+        customer_email=current_user.email,
+        order_id=new_order.id
+    )
+
+    return new_order
+```
+
+
+3. PERIODIC BACKGROUND CRON JOB (APScheduler / ARQ)
+------------------------------------------------------------------------------
+To auto-cancel unaccepted orders older than 15 minutes, run a periodic task using `apscheduler` (`uv add apscheduler`):
+
+```python
+# app/core/scheduler.py
+from datetime import datetime, timedelta
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import select
+from app.core.database import AsyncSessionLocal
+from app.models.order import Order, OrderStatus
+from app.core.websockets import order_ws_manager
+
+scheduler = AsyncIOScheduler()
+
+async def auto_cancel_stale_orders():
+    """
+    Checks for orders in PENDING status created more than 15 minutes ago.
+    Marks them as CANCELLED and notifies customer.
+    """
+    async with AsyncSessionLocal() as db:
+        cutoff_time = datetime.utcnow() - timedelta(minutes=15)
+
+        result = await db.execute(
+            select(Order).where(
+                Order.status == OrderStatus.PENDING,
+                Order.created_at <= cutoff_time
+            )
+        )
+        stale_orders = result.scalars().all()
+
+        for order in stale_orders:
+            order.status = OrderStatus.CANCELLED
+            order.cancellation_reason = "Auto-cancelled: Vendor did not respond within 15 minutes"
+
+            # Trigger WebSocket update to customer
+            await order_ws_manager.broadcast_to_order(
+                order_id=order.id,
+                message={
+                    "event": "ORDER_CANCELLED",
+                    "reason": order.cancellation_reason
+                }
+            )
+
+        if stale_orders:
+            await db.commit()
+            print(f"[Scheduler] Auto-cancelled {len(stale_orders)} stale orders.")
+
+def start_scheduler():
+    # Run auto-cancel check every 1 minute
+    scheduler.add_job(auto_cancel_stale_orders, "interval", minutes=1)
+    scheduler.start()
+```
+
+
+4. REGISTER SCHEDULER IN MAIN APP LIFESPAN
+------------------------------------------------------------------------------
+Start the background scheduler when FastAPI boots up:
+
+```python
+# app/main.py
+from app.core.scheduler import start_scheduler, scheduler
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_scheduler()
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+```
+
+==============================================================================
