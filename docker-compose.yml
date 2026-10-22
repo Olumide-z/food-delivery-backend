@@ -19,6 +19,22 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: food_delivery_redis
+    restart: unless-stopped
+    ports:
+      # Expose Redis on host so you can inspect it locally with redis-cli
+      - "6379:6379"
+    volumes:
+      # Persists Redis data between container restarts
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   app:
     build: .
     container_name: food_delivery_app
@@ -30,12 +46,18 @@ services:
       # Override DATABASE_URL: replace 'localhost' with the db service name
       # Inside Docker, containers talk to each other by service name, not localhost
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db/food_delivery_db
+      # Override REDIS_URL: replace 'localhost' with the redis service name
+      REDIS_URL: redis://redis:6379
     ports:
       - "8000:8000"
     depends_on:
       db:
         # Wait until Postgres is actually ready before starting the app
         condition: service_healthy
+      redis:
+        # Wait until Redis is actually ready before starting the app
+        condition: service_healthy
 
 volumes:
   postgres_data:
+  redis_data:

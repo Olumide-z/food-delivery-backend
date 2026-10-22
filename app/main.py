@@ -10,7 +10,8 @@ from app.auth.routes import router as auth_router
 from app.customers.routes import router as customers_router
 from app.vendors.routes import router as vendors_router
 from app.riders.routes import router as riders_router
-import app.models  # Ensures SQLAlchemy models are registered with Base.metadata
+from app.health.routes import router as health_router
+import app.models as _models_init  # Ensures SQLAlchemy models are registered with Base.metadata
 import logging
 from sqlalchemy import text
 import redis.asyncio as redis
@@ -142,6 +143,24 @@ async def global_unhandled_exception_handler(request: Request, exc: Exception):
             status="error", message="An unexpected internal server error occurred.", data=None)
     )
 
+# security headers middleware
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+
+    if "Referrer-Policy" not in response.headers:
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    return response
+
+# Infrastructure / observability
+app.include_router(health_router, prefix='/api/v1', tags=['health'])
 
 # Auth & user management
 app.include_router(auth_router, prefix='/api/v1/auth', tags=['auth'])
