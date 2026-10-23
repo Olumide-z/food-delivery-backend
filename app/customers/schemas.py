@@ -39,9 +39,32 @@ class DeliveryAddressCreatedResponse(BaseModel):
 
 
 class OrderItemCreate(BaseModel):
-    menu_id: int
-    quantity: int = Field(default=1, ge=1)
-    selected_options: list[int] = Field(default_factory=list)
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "menu_id": 1,
+                "quantity": 2,
+                "selected_options": [3, 7]
+            }
+        }
+    )
+
+    menu_id: int = Field(
+        description="ID of the menu item to order."
+    )
+    quantity: int = Field(
+        default=1,
+        ge=1,
+        description="How many of this item. Must be at least 1."
+    )
+    selected_options: list[int] = Field(
+        default_factory=list,
+        description=(
+            "IDs of MenuOptionItems to customise this item (e.g. extra toppings, drink size). "
+            "Find these IDs under the menu's 'menus_options[].options' field. "
+            "Pass an empty list [] if no customisations are needed."
+        )
+    )
 
 
 class OrderItemResponse(BaseModel):
@@ -49,16 +72,37 @@ class OrderItemResponse(BaseModel):
 
     id: int
     menu_id: int
+    menu: MenuResponse
     unit_price: int
     quantity: int
     total_price: int
-    selected_options: list[int] | dict | list[dict] | None = None
+    selected_options: list[SelectedOptionResponse] | None = None
 
 
 class OrderCreateRequest(BaseModel):
-    restaurant_id: int
-    delivery_address_id: int
-    items: list[OrderItemCreate] = Field(min_length=1)
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "restaurant_id": 1,
+                "delivery_address_id": 1,
+                "items": [
+                    {"menu_id": 1, "quantity": 2, "selected_options": [3, 7]},
+                    {"menu_id": 4, "quantity": 1, "selected_options": []}
+                ]
+            }
+        }
+    )
+
+    restaurant_id: int = Field(
+        description="ID of the restaurant you are ordering from."
+    )
+    delivery_address_id: int = Field(
+        description="ID of your saved delivery address."
+    )
+    items: list[OrderItemCreate] = Field(
+        min_length=1,
+        description="List of items to order. Must contain at least one item."
+    )
 
 
 class OrderResponse(BaseModel):

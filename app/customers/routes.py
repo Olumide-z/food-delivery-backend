@@ -577,6 +577,20 @@ async def create_order(
     await db.commit()
     await db.refresh(new_order)
     await db.refresh(new_order, attribute_names=["items", "delivery_address"])
+    # Re-query to get items with full menu data
+    refreshed_result = await db.execute(
+        select(Order)
+        .options(
+            selectinload(Order.items)
+            .selectinload(OrderItem.menu)
+            .selectinload(Menu.menus_options)
+            .selectinload(MenuOptionGroup.options),
+            selectinload(Order.delivery_address)
+            .selectinload(DeliveryAddress.user)
+        )
+        .where(Order.id == new_order.id)
+    )
+    new_order = refreshed_result.scalars().first()
 
     payment_url = await initialize_paystack_payment(
         email=current_user.email,
@@ -647,7 +661,14 @@ async def get_order_history(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(
+            selectinload(Order.items)
+            .selectinload(OrderItem.menu)
+            .selectinload(Menu.menus_options)
+            .selectinload(MenuOptionGroup.options),
+            selectinload(Order.delivery_address)
+            .selectinload(DeliveryAddress.user)
+        )
         .where(Order.customer_id == current_user.id)
         .order_by(Order.created_at.desc())
     )
@@ -667,7 +688,14 @@ async def verify_order_payment(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(
+            selectinload(Order.items)
+            .selectinload(OrderItem.menu)
+            .selectinload(Menu.menus_options)
+            .selectinload(MenuOptionGroup.options),
+            selectinload(Order.delivery_address)
+            .selectinload(DeliveryAddress.user)
+        )
         .where(Order.order_number == reference, Order.customer_id == current_user.id)
     )
     order = result.scalars().first()
@@ -701,7 +729,14 @@ async def get_order_details(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(
+            selectinload(Order.items)
+            .selectinload(OrderItem.menu)
+            .selectinload(Menu.menus_options)
+            .selectinload(MenuOptionGroup.options),
+            selectinload(Order.delivery_address)
+            .selectinload(DeliveryAddress.user)
+        )
         .where(Order.id == order_id, Order.customer_id == current_user.id)
     )
     order = result.scalars().first()
