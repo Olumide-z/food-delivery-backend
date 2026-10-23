@@ -67,6 +67,12 @@ class OrderItemCreate(BaseModel):
     )
 
 
+class SelectedOptionResponse(BaseModel):
+    id: int
+    name: str
+    additional_price: int
+
+
 class OrderItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -155,12 +161,6 @@ class ReviewResponse(ReviewBase):
 class ReviewCreatedResponse(BaseModel):
     message: str | None = None
     review: ReviewResponse
-
-
-class SelectedOptionResponse(BaseModel):
-    id: int
-    name: str
-    additional_price: int
 
 
 class CartItemAddRequest(BaseModel):
