@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     )
 
     database_url: str
+    # Optional direct (non-pooled) URL used only by Alembic migrations.
+    # Falls back to database_url if not set.
+    database_migration_url: str | None = None
 
     secret_key: SecretStr
     algorithm: str = "HS256"

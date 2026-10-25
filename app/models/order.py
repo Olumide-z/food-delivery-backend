@@ -1,7 +1,7 @@
 from __future__ import annotations
 from enum import Enum
 from app.core.database import Base
-from sqlalchemy import Integer, String, Boolean, JSON, ForeignKey, Enum as SQLEnum, DateTime, Index
+from sqlalchemy import Integer, String, Boolean, JSON, ForeignKey, Enum as SQLEnum, DateTime, Index, text
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import TYPE_CHECKING, Optional
 from datetime import datetime, UTC
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from app.models.user import User
     from app.models.resturant import Resturants, Menu
     from app.models.customer import DeliveryAddress
+    from app.models.coupon import Coupon
 
 
 class OrderStatus(str, Enum):
@@ -49,6 +50,9 @@ class Order(Base):
         "resturants.id", ondelete="CASCADE"), nullable=False, index=True)
     rider_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    coupon_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("coupons.id", ondelete="SET NULL"), nullable=True, index=True)
+
     delivery_address_id: Mapped[int] = mapped_column(
         ForeignKey("delivery_addresses.id"), nullable=False)
     status: Mapped[OrderStatus] = mapped_column(
@@ -62,7 +66,11 @@ class Order(Base):
         Integer, nullable=False)  # In minor units (cents/kobo)
     delivery_fee: Mapped[int] = mapped_column(Integer, nullable=False)
     service_fee: Mapped[int] = mapped_column(Integer, default=0)
-    # subtotal + delivery_fee + service_fee
+    discount_amount: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False)
+    coupon_code: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True, index=True)  # Applied coupon code
+    # subtotal + delivery_fee + service_fee - discount_amount
     total_amount: Mapped[int] = mapped_column(Integer, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -72,11 +80,14 @@ class Order(Base):
 
     # Relationships
     customer: Mapped[User] = relationship("User", foreign_keys=[customer_id])
-    rider: Mapped[Optional[User]] = relationship("User", foreign_keys=[rider_id])
+    rider: Mapped[Optional[User]] = relationship(
+        "User", foreign_keys=[rider_id])
     restaurant: Mapped[Resturants] = relationship("Resturants")
     delivery_address: Mapped[DeliveryAddress] = relationship("DeliveryAddress")
     items: Mapped[list[OrderItem]] = relationship(
         "OrderItem", back_populates="order", cascade="all, delete-orphan")
+    coupon: Mapped[Optional[Coupon]] = relationship(
+        "Coupon", foreign_keys=[coupon_id])
 
 
 class OrderItem(Base):
@@ -114,6 +125,7 @@ class PaymentTransaction(Base):
         String(100), unique=True, index=True, nullable=False)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(
-        String(20), default="pending", index=True)  # "pending", "success", "failed"
+        # "pending", "success", "failed"
+        String(20), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC))

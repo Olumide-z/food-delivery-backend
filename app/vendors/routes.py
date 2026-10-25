@@ -1,10 +1,22 @@
+from app.vendors.schemas import CouponUpdateRequest
+from app.vendors.services import _get_vendor_coupon
+from sqlalchemy.exc import IntegrityError
+from app.vendors.services import _normalize_expiry
+from app.vendors.services import _validate_discount
+from app.vendors.schemas import CouponCreateRequest
+from app.vendors.schemas import CouponResponse
+from app.vendors.schemas import WalletResponse
+from app.models import Wallet, WalletTransaction
+from app.vendors.wallet_service import credit_wallets
+from app.models.payment import VendorBanks
+from app.vendors.schemas import BankResponse, BankCreationRequest, BankUpdateRequest
 from app.vendors.schemas import VendorAnalyticResponse
 from app.models.order import OrderItem
 from app.models import OrderStatus
 from app.vendors.schemas import VendorOrderStatusUpdate
 from app.customers.schemas import OrderResponse
 from app.core.security import CurrentUser
-from app.models import Resturants, Menu, MenuOptionGroup, MenuOptionItem, Order
+from app.models import Resturants, Menu, MenuOptionGroup, MenuOptionItem, Order, DeliveryAddress
 from app.core.database import get_db
 from app.core.response import api_response, ApiResponse
 from fastapi import File, UploadFile, Query, APIRouter, Depends, status, HTTPException, Request
@@ -31,8 +43,10 @@ from app.vendors.schemas import (
 from typing import Annotated
 from app.core.security import RoleChecker
 from app.models.user import UserRole, User
+from app.models.coupon import Coupon
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
+from datetime import datetime, UTC
 
 router = APIRouter()
 require_vendor = RoleChecker(allowed_roles=[UserRole.VENDOR])
@@ -63,7 +77,8 @@ async def get_restaurants(
     has_more = skip + len(restaurants) < total
 
     data = PaginatedResturantsResponse(
-        restaurants=[ResturantResponse.model_validate(restaurant) for restaurant in restaurants],
+        restaurants=[ResturantResponse.model_validate(
+            restaurant) for restaurant in restaurants],
         total=total,
         skip=skip,
         limit=limit,
@@ -718,7 +733,14 @@ async def vendor_update_status_order(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(
+            selectinload(Order.items)
+            .selectinload(OrderItem.menu)
+            .selectinload(Menu.menus_options)
+            .selectinload(MenuOptionGroup.options),
+            selectinload(Order.delivery_address)
+            .selectinload(DeliveryAddress.user)
+        )
         .join(Resturants, Resturants.id == Order.restaurant_id)
         .where(Order.id == order_id, Resturants.user_id == current_user.id)
     )
@@ -743,9 +765,26 @@ async def vendor_update_status_order(
             detail="Order must be in PREPARING status before marking READY FOR PICKUP"
         )
 
+    if status_data.status == OrderStatus.DELIVERED:
+        await credit_wallets(order, db)
+
     order.status = status_data.status
     await db.commit()
-    await db.refresh(order, attribute_names=["items", "delivery_address"])
+
+    # Re-query with full eager loads so Pydantic can serialize the menu chain
+    refreshed = await db.execute(
+        select(Order)
+        .options(
+            selectinload(Order.items)
+            .selectinload(OrderItem.menu)
+            .selectinload(Menu.menus_options)
+            .selectinload(MenuOptionGroup.options),
+            selectinload(Order.delivery_address)
+            .selectinload(DeliveryAddress.user)
+        )
+        .where(Order.id == order_id)
+    )
+    order = refreshed.scalars().first()
 
     return api_response(
         data=OrderResponse.model_validate(order),
@@ -821,3 +860,310 @@ async def get_vendor_analytics(
         data=analytics_data,
         message="Vendor analytics retrieved successfully"
     )
+
+
+@router.get('/{restaurant_id}/wallet', response_model=ApiResponse[WalletResponse])
+async def get_wallet(
+    current_user: Annotated[User, Depends(require_vendor)],
+    restaurant_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+
+    result = await db.execute(
+        select(Wallet)
+        .options(selectinload(Wallet.wallet_transactions))
+        .where(Wallet.user_id == current_user.id)
+    )
+    wallet = result.scalars().first()
+
+    if not wallet:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Wallet not found'
+        )
+
+    return api_response(
+        data=WalletResponse.model_validate(wallet),
+        message='Wallet fetched successfully'
+    )
+
+
+@router.get('/{restaurant_id}/bank', response_model=ApiResponse[BankResponse])
+async def get_bank(
+    current_user: Annotated[User, Depends(require_vendor)],
+    restaurant_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+
+    result = await db.execute(
+        select(VendorBanks)
+        .where(VendorBanks.restaurant_id == restaurant_id)
+    )
+    bank = result.scalars().first()
+
+    if not bank:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Bank details not found"
+        )
+
+    return api_response(
+        data=BankResponse.model_validate(bank),
+        message='Bank details fetched successfully'
+    )
+
+
+@router.post('/{restaurant_id}/bank', response_model=ApiResponse[BankResponse])
+async def add_bank(
+    current_user: Annotated[User, Depends(require_vendor)],
+    restaurant_id: int,
+    bank_request: BankCreationRequest,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+
+    new_bank = VendorBanks(
+        user_id=current_user.id,
+        restaurant_id=restaurant_id,
+        bank_name=bank_request.bank_name,
+        account_number=bank_request.account_number,
+        account_name=bank_request.account_name
+    )
+
+    db.add(new_bank)
+    await db.commit()
+    await db.refresh(new_bank)
+
+    return api_response(
+        data=BankResponse.model_validate(new_bank),
+        message='Bank Details Added Successfully'
+    )
+
+
+@router.patch('/{restaurant_id}/bank', response_model=ApiResponse[BankResponse])
+async def edit_bank(
+    current_user: Annotated[User, Depends(require_vendor)],
+    restaurant_id: int,
+    bank_request: BankUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+
+    result = await db.execute(
+        select(VendorBanks)
+        .where(VendorBanks.restaurant_id == restaurant_id)
+    )
+    bank = result.scalars().first()
+
+    if not bank:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Bank details not found"
+        )
+
+    # Only update fields that were actually sent in the request
+    update_data = bank_request.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(bank, field, value)
+
+    await db.commit()
+    await db.refresh(bank)
+
+    return api_response(
+        data=BankResponse.model_validate(bank),
+        message='Bank details updated successfully'
+    )
+
+
+@router.delete('/{restaurant_id}/bank', response_model=ApiResponse[None], status_code=status.HTTP_200_OK)
+async def delete_bank(
+    current_user: Annotated[User, Depends(require_vendor)],
+    restaurant_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+
+    result = await db.execute(
+        select(VendorBanks)
+        .where(VendorBanks.restaurant_id == restaurant_id)
+    )
+    bank = result.scalars().first()
+
+    if not bank:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Bank details not found"
+        )
+
+    await db.delete(bank)
+    await db.commit()
+
+    return api_response(message='Bank details deleted successfully')
+
+# create coupon
+
+
+@router.post(
+    '/{restaurant_id}/coupons',
+    response_model=ApiResponse[CouponResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit("20/minute")
+async def create_coupon(
+    request: Request,
+    restaurant_id: int,
+    coupon_data: CouponCreateRequest,
+    current_user: Annotated[User, Depends(require_vendor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+
+    dtype = _validate_discount(
+        coupon_data.discount_type, coupon_data.discount_value)
+    expires_at = _normalize_expiry(coupon_data.expires_at)
+    if expires_at and expires_at <= datetime.now(UTC):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="expires_at must be in the future",
+        )
+
+    code = coupon_data.code.strip().upper()
+
+    existing = await db.execute(
+        select(Coupon.id).where(
+            Coupon.restaurant_id == restaurant_id, Coupon.code == code
+        )
+    )
+    if existing.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A coupon with this code already exists for this restaurant",
+        )
+
+    new_coupon = Coupon(
+        restaurant_id=restaurant_id,
+        code=code,
+        discount_type=dtype,
+        discount_value=coupon_data.discount_value,
+        min_order_amount=coupon_data.min_order_amount,
+        max_uses=coupon_data.max_uses,
+        expires_at=expires_at,
+    )
+    db.add(new_coupon)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A coupon with this code already exists for this restaurant",
+        )
+    await db.refresh(new_coupon)
+
+    return api_response(
+        data=CouponResponse.model_validate(new_coupon),
+        message="Coupon created successfully",
+    )
+
+# list coupons for a restaurant
+
+
+@router.get('/{restaurant_id}/coupons', response_model=ApiResponse[list[CouponResponse]])
+async def get_coupons(
+    restaurant_id: int,
+    current_user: Annotated[User, Depends(require_vendor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    is_active: Annotated[bool | None, Query()] = None,
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+
+    query = select(Coupon).where(Coupon.restaurant_id == restaurant_id)
+    if is_active is not None:
+        query = query.where(Coupon.is_active.is_(is_active))
+    result = await db.execute(query.order_by(Coupon.created_at.desc()))
+
+    data = [CouponResponse.model_validate(c) for c in result.scalars().all()]
+    return api_response(data=data, message="Coupons fetched successfully")
+
+
+# get single coupon
+@router.get('/{restaurant_id}/coupons/{coupon_id}', response_model=ApiResponse[CouponResponse])
+async def get_single_coupon(
+    restaurant_id: int,
+    coupon_id: int,
+    current_user: Annotated[User, Depends(require_vendor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+    coupon = await _get_vendor_coupon(restaurant_id, coupon_id, db)
+    return api_response(
+        data=CouponResponse.model_validate(coupon),
+        message="Coupon fetched successfully",
+    )
+
+
+# update coupon (code itself is immutable; deactivate + create a new one instead)
+@router.patch('/{restaurant_id}/coupons/{coupon_id}', response_model=ApiResponse[CouponResponse])
+async def update_coupon(
+    restaurant_id: int,
+    coupon_id: int,
+    coupon_data: CouponUpdateRequest,
+    current_user: Annotated[User, Depends(require_vendor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+    coupon = await _get_vendor_coupon(restaurant_id, coupon_id, db)
+
+    update_data = coupon_data.model_dump(exclude_unset=True)
+
+    # Validate the resulting type/value combination, not just the incoming fields
+    new_type = update_data.get("discount_type", coupon.discount_type.value)
+    new_value = update_data.get("discount_value", coupon.discount_value)
+    dtype = _validate_discount(new_type, new_value)
+    if "discount_type" in update_data:
+        update_data["discount_type"] = dtype
+
+    if "expires_at" in update_data:
+        update_data["expires_at"] = _normalize_expiry(
+            update_data["expires_at"])
+
+    new_max_uses = update_data.get("max_uses", coupon.max_uses)
+    if new_max_uses is not None and new_max_uses < coupon.used_count:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"max_uses cannot be lower than the current used_count ({coupon.used_count})",
+        )
+
+    for field, value in update_data.items():
+        setattr(coupon, field, value)
+
+    await db.commit()
+    await db.refresh(coupon)
+
+    return api_response(
+        data=CouponResponse.model_validate(coupon),
+        message="Coupon updated successfully",
+    )
+
+
+# delete coupon
+@router.delete(
+    '/{restaurant_id}/coupons/{coupon_id}',
+    response_model=ApiResponse[None],
+    status_code=status.HTTP_200_OK,
+)
+async def delete_coupon(
+    restaurant_id: int,
+    coupon_id: int,
+    current_user: Annotated[User, Depends(require_vendor)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    await verify_restaurant_ownership(restaurant_id, current_user.id, db)
+    coupon = await _get_vendor_coupon(restaurant_id, coupon_id, db)
+
+    await db.delete(coupon)
+    await db.commit()
+    return api_response(message="Coupon deleted successfully")

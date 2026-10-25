@@ -1,4 +1,7 @@
-from app.models import Resturants
+from app.vendors.wallet_service import credit_wallets
+from app.vendors.schemas import WalletResponse
+from app.models import Resturants, Menu, MenuOptionGroup, DeliveryAddress, Wallet
+from app.models.order import Order, OrderStatus, OrderItem
 from app.riders.schemas import DeliveryUpdate
 from fastapi import Query, APIRouter, Depends, status, HTTPException, Request
 from app.core.limiter import limiter
@@ -8,7 +11,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.core.response import api_response, ApiResponse
-from app.models.order import Order, OrderStatus
 from app.models.user import UserRole, User
 from app.core.security import RoleChecker
 from app.customers.schemas import OrderResponse
@@ -16,6 +18,16 @@ from app.customers.schemas import OrderResponse
 
 router = APIRouter()
 require_rider = RoleChecker(allowed_roles=[UserRole.RIDER])
+
+# Reusable selectinload options for full OrderResponse serialization
+ORDER_LOAD_OPTIONS = [
+    selectinload(Order.items)
+    .selectinload(OrderItem.menu)
+    .selectinload(Menu.menus_options)
+    .selectinload(MenuOptionGroup.options),
+    selectinload(Order.delivery_address)
+    .selectinload(DeliveryAddress.user),
+]
 
 
 # get active trip details
@@ -28,7 +40,7 @@ async def get_active_orders(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(*ORDER_LOAD_OPTIONS)
         .where(
             Order.status != OrderStatus.DELIVERED,
             Order.rider_id == current_user.id
@@ -53,7 +65,7 @@ async def get_available_orders(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(*ORDER_LOAD_OPTIONS)
         .where(
             Order.status == OrderStatus.READY_FOR_PICKUP,
             Order.rider_id.is_(None)
@@ -79,7 +91,7 @@ async def accept_delivery_order(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(*ORDER_LOAD_OPTIONS)
         .where(Order.id == order_id)
     )
     order = result.scalars().first()
@@ -100,7 +112,12 @@ async def accept_delivery_order(
     order.rider_id = current_user.id
     order.status = OrderStatus.RIDER_GOING_TO_VENDOR
     await db.commit()
-    await db.refresh(order, attribute_names=["items", "delivery_address"])
+
+    # Re-query with full eager loads after commit
+    refreshed = await db.execute(
+        select(Order).options(*ORDER_LOAD_OPTIONS).where(Order.id == order_id)
+    )
+    order = refreshed.scalars().first()
 
     return api_response(
         data=OrderResponse.model_validate(order),
@@ -120,7 +137,7 @@ async def update_delivery_status(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(*ORDER_LOAD_OPTIONS)
         .where(Order.id == order_id, Order.rider_id == current_user.id)
     )
 
@@ -144,9 +161,17 @@ async def update_delivery_status(
             detail="Order must be in OUT FOR DELIVERY status before marking DELIVERED"
         )
 
+    if status_data.status == OrderStatus.DELIVERED:
+        await credit_wallets(order, db)
+
     order.status = status_data.status
     await db.commit()
-    await db.refresh(order, attribute_names=["items", "delivery_address"])
+
+    # Re-query with full eager loads after commit
+    refreshed = await db.execute(
+        select(Order).options(*ORDER_LOAD_OPTIONS).where(Order.id == order_id)
+    )
+    order = refreshed.scalars().first()
 
     return api_response(
         data=OrderResponse.model_validate(order),
@@ -164,7 +189,7 @@ async def get_completed_orders(
 ):
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items), selectinload(Order.delivery_address))
+        .options(*ORDER_LOAD_OPTIONS)
         .where(
             Order.status == OrderStatus.DELIVERED,
             Order.rider_id == current_user.id
@@ -177,3 +202,29 @@ async def get_completed_orders(
     completed_orders = result.scalars().all()
     data = [OrderResponse.model_validate(o) for o in completed_orders]
     return api_response(data=data, message="Completed orders retrieved successfully")
+
+
+@router.get('/{rider_id}/wallet', response_model=ApiResponse[WalletResponse])
+async def get_wallet(
+    current_user: Annotated[User, Depends(require_rider)],
+    rider_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)]
+):
+
+    result = await db.execute(
+        select(Wallet)
+        .options(selectinload(Wallet.wallet_transactions))
+        .where(Wallet.user_id == current_user.id)
+    )
+    wallet = result.scalars().first()
+
+    if not wallet:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Wallet not found'
+        )
+
+    return api_response(
+        data=WalletResponse.model_validate(wallet),
+        message='Wallet fetched successfully'
+    )

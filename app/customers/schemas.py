@@ -82,7 +82,7 @@ class OrderItemResponse(BaseModel):
     unit_price: int
     quantity: int
     total_price: int
-    selected_options: list[SelectedOptionResponse] | None = None
+    selected_options: list[int] | None = None
 
 
 class OrderCreateRequest(BaseModel):
@@ -109,6 +109,10 @@ class OrderCreateRequest(BaseModel):
         min_length=1,
         description="List of items to order. Must contain at least one item."
     )
+    coupon_code: str | None = Field(
+        default=None,
+        description="Optional coupon code for a discount. Must belong to the selected restaurant."
+    )
 
 
 class OrderResponse(BaseModel):
@@ -126,6 +130,8 @@ class OrderResponse(BaseModel):
     subtotal: int
     delivery_fee: int
     service_fee: int
+    discount_amount: int
+    coupon_code: str | None = None
     total_amount: int
     items: list[OrderItemResponse]
     created_at: datetime
@@ -188,3 +194,17 @@ class CartResponse(BaseModel):
     items: list[CartItemResponse]
     total_amount: int
     restaurant: ResturantResponse
+
+
+class CouponValidateRequest(BaseModel):
+    restaurant_id: int
+    code: str = Field(min_length=1, max_length=50)
+    subtotal: int = Field(ge=0)
+
+
+class CouponValidateResponse(BaseModel):
+    code: str
+    discount_type: str
+    discount_value: int
+    discount_amount: int  # what this coupon takes off the given subtotal
+    new_subtotal: int

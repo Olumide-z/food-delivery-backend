@@ -1,7 +1,13 @@
+from app.customers.services import redeem_coupon
+from app.customers.services import calculate_discount
+from app.customers.services import get_valid_coupon
+from app.customers.schemas import CouponValidateRequest
+from app.customers.schemas import CouponValidateResponse
 import logging
 from app.models.cart import CartItem, Cart
 from app.customers.schemas import CartResponse, CartItemAddRequest
 from app.models.resturant import Reviews
+from app.models import Coupon
 from app.customers.schemas import ReviewRequest, ReviewResponse, ReviewCreatedResponse
 from app.core.limiter import limiter
 from sqlalchemy import func
@@ -128,7 +134,8 @@ async def get_single_restaurant(
                 message="Restaurant details retrieved successfully"
             )
     except Exception:
-        logger.warning("Redis read failed for key %s", cache_key, exc_info=True)
+        logger.warning("Redis read failed for key %s",
+                       cache_key, exc_info=True)
 
     # 2. Cache miss: query the DB
     results = await db.execute(
@@ -150,7 +157,8 @@ async def get_single_restaurant(
     try:
         await r.set(cache_key, data.model_dump_json(), ex=CUSTOMER_CACHE_TTL)
     except Exception:
-        logger.warning("Redis write failed for key %s", cache_key, exc_info=True)
+        logger.warning("Redis write failed for key %s",
+                       cache_key, exc_info=True)
 
     return api_response(
         data=data,
@@ -158,6 +166,8 @@ async def get_single_restaurant(
     )
 
 # top food categories
+
+
 @router.get("/top-categories", response_model=ApiResponse[list[CategoryItemResponse]])
 async def get_top_categories(
     current_user: Annotated[User, Depends(require_customer)],
@@ -550,9 +560,17 @@ async def create_order(
             "selected_options": item.selected_options
         })
 
+    coupon = None
+    discount_amount = 0
+    if order_data.coupon_code:
+        coupon = await get_valid_coupon(
+            db, restaurant.id, order_data.coupon_code, subtotal
+        )
+        discount_amount = calculate_discount(coupon, subtotal)
+
     delivery_fee = 1500
     service_fee = 500
-    total_amount = subtotal + delivery_fee + service_fee
+    total_amount = subtotal - discount_amount + delivery_fee + service_fee
     order_number = f"ORD-{uuid4().hex[:8].upper()}"
 
     new_order = Order(
@@ -565,16 +583,23 @@ async def create_order(
         service_fee=service_fee,
         total_amount=total_amount,
         status=OrderStatus.PENDING_PAYMENT,
-        payment_status=PaymentStatus.PENDING
+        payment_status=PaymentStatus.PENDING,
+        coupon_code=coupon.code if coupon else None,
+        discount_amount=discount_amount,
     )
 
     db.add(new_order)
     await db.flush()
 
+    # Redeem inside the same transaction: if the order fails, the use is rolled back
+    if coupon:
+        await redeem_coupon(db, coupon)
+
     for item_dict in order_items_to_create:
         db.add(OrderItem(order_id=new_order.id, **item_dict))
 
     await db.commit()
+
     await db.refresh(new_order)
     await db.refresh(new_order, attribute_names=["items", "delivery_address"])
     # Re-query to get items with full menu data
@@ -767,6 +792,18 @@ async def cancel_order(
     if order.status not in [OrderStatus.PENDING_PAYMENT, OrderStatus.PAID]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="Cannot cancel order once food preparation has started")
+
+    # cancel_order — give the coupon use back
+    if order.coupon_code:
+        await db.execute(
+            update(Coupon)
+            .where(
+                Coupon.restaurant_id == order.restaurant_id,
+                Coupon.code == order.coupon_code,
+                Coupon.used_count > 0,
+            )
+            .values(used_count=Coupon.used_count - 1)
+        )
 
     order.status = OrderStatus.CANCELLED
     await db.commit()
@@ -1120,3 +1157,26 @@ async def remove_from_cart(
     await db.commit()
 
     return api_response(message="Cart item removed successfully")
+
+
+@router.post("/coupons/validate", response_model=ApiResponse[CouponValidateResponse])
+@limiter.limit("20/minute")
+async def validate_coupon(
+    request: Request,
+    payload: CouponValidateRequest,
+    current_user: Annotated[User, Depends(require_customer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    coupon = await get_valid_coupon(db, payload.restaurant_id, payload.code, payload.subtotal)
+    discount = calculate_discount(coupon, payload.subtotal)
+
+    return api_response(
+        data=CouponValidateResponse(
+            code=coupon.code,
+            discount_type=coupon.discount_type.value,
+            discount_value=coupon.discount_value,
+            discount_amount=discount,
+            new_subtotal=payload.subtotal - discount,
+        ),
+        message="Coupon is valid",
+    )
