@@ -1,3 +1,9 @@
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db/food_delivery_db
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+
 services:
   db:
     image: postgres:17-alpine
@@ -37,6 +43,7 @@ services:
 
   app:
     build: .
+    image: food_delivery_backend
     container_name: food_delivery_app
     restart: unless-stopped
     env_file:
@@ -45,9 +52,8 @@ services:
     environment:
       # Override DATABASE_URL: replace 'localhost' with the db service name
       # Inside Docker, containers talk to each other by service name, not localhost
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db/food_delivery_db
       # Override REDIS_URL: replace 'localhost' with the redis service name
-      REDIS_URL: redis://redis:6379
+      <<: *app-env
     ports:
       - "8000:8000"
     depends_on:
@@ -57,6 +63,44 @@ services:
       redis:
         # Wait until Redis is actually ready before starting the app
         condition: service_healthy
+
+  celery_worker:
+    image: food_delivery_backend     # no second build
+    container_name: food_delivery_celery_worker
+    restart: unless-stopped
+    command: uv run --no-sync celery -A app.core.celery_app:celery_app worker --loglevel=info -E
+    env_file: .env
+    environment:
+      <<: *app-env
+    volumes:
+      # Mount local source code so task changes are picked up without rebuilding.
+      # After adding/editing tasks: docker-compose restart celery_worker
+      - ./app:/app/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # app:
+      #   condition: service_started   # makes sure the image is built first
+
+
+  flower:
+    image: food_delivery_backend
+    container_name: food_delivery_flower
+    restart: unless-stopped
+    command: uv run --no-sync celery -A app.core.celery_app:celery_app flower --port=5555
+    env_file: .env
+    environment:
+      <<: *app-env
+      FLOWER_BASIC_AUTH: ${FLOWER_USER}:${FLOWER_PASSWORD}
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery_worker:
+        condition: service_started
 
 volumes:
   postgres_data:

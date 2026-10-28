@@ -1,3 +1,7 @@
+from app.tasks.email_tasks import send_order_cancelled_email
+from app.tasks.email_tasks import send_payment_success_email
+from app.tasks.email_tasks import send_vendor_notification_email
+from app.tasks.email_tasks import send_order_confirmation_email
 from app.customers.services import redeem_coupon
 from app.customers.services import calculate_discount
 from app.customers.services import get_valid_coupon
@@ -492,6 +496,7 @@ async def create_order(
 
     result = await db.execute(
         select(Resturants)
+        .options(selectinload(Resturants.user))
         .where(Resturants.id == order_data.restaurant_id)
     )
     restaurant = result.scalars().first()
@@ -629,6 +634,24 @@ async def create_order(
         payment_url=payment_url
     )
 
+    # Send email notifications asynchronously
+    send_order_confirmation_email.delay(
+        user_email=current_user.email,
+        order_id=str(order_number)
+    )
+
+    # Notify vendor of the new order
+    if restaurant.email:
+        send_vendor_notification_email.delay(
+            vendor_email=restaurant.email,
+            order_id=str(order_number)
+        )
+    elif restaurant.user.email:
+        send_vendor_notification_email.delay(
+            vendor_email=restaurant.user.email,
+            order_id=str(order_number)
+        )
+
     return api_response(
         data=checkout_data,
         message="Order created successfully. Please complete payment."
@@ -662,7 +685,11 @@ async def paystack_webhook(
 
     if event_type == "charge.success":
         reference = event_data["data"]["reference"]
-        order_res = await db.execute(select(Order).where(Order.order_number == reference))
+        order_res = await db.execute(
+            select(Order)
+            .options(selectinload(Order.customer))
+            .where(Order.order_number == reference)
+        )
         order = order_res.scalars().first()
 
         if order:
@@ -671,6 +698,13 @@ async def paystack_webhook(
             await db.commit()
             logger.info(
                 "Paystack webhook: Order %s updated to PAID", reference)
+
+            # Send email to customer
+            send_payment_success_email.delay(
+                user_email=order.customer.email,
+                order_number=order.order_number,
+                total_amount=order.total_amount
+            )
         else:
             logger.warning(
                 "Paystack webhook: Received success event for non-existent order reference: %s", reference)
@@ -723,6 +757,7 @@ async def verify_order_payment(
         )
         .where(Order.order_number == reference, Order.customer_id == current_user.id)
     )
+    # Note: customer email comes from current_user (already in scope) — no extra join needed
     order = result.scalars().first()
 
     if not order:
@@ -741,6 +776,13 @@ async def verify_order_payment(
         order.status = OrderStatus.PAID
         await db.commit()
         await db.refresh(order, attribute_names=["items", "delivery_address"])
+
+        # Send email to customer (current_user is the order owner — no extra join needed)
+        send_payment_success_email.delay(
+            user_email=current_user.email,
+            order_number=order.order_number,
+            total_amount=order.total_amount
+        )
 
     return api_response(data=OrderResponse.model_validate(order), message="Payment verification checked")
 
@@ -781,8 +823,8 @@ async def cancel_order(
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
     result = await db.execute(
-        select(Order).where(Order.id == order_id,
-                            Order.customer_id == current_user.id)
+        select(Order)
+        .where(Order.id == order_id, Order.customer_id == current_user.id)
     )
     order = result.scalars().first()
     if not order:
@@ -806,7 +848,15 @@ async def cancel_order(
         )
 
     order.status = OrderStatus.CANCELLED
+
     await db.commit()
+
+    # Send email to customer (current_user is the order owner — no extra join needed)
+    send_order_cancelled_email.delay(
+        user_email=current_user.email,
+        order_number=order.order_number,
+    )
+
     return api_response(message="Order cancelled successfully")
 
 

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
 
     environment: str = 'development'
     redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/1"
 
 
 settings = Settings()

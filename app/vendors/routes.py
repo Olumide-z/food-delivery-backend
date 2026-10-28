@@ -1,3 +1,4 @@
+from app.tasks.email_tasks import send_order_status_update_email
 from app.vendors.schemas import CouponUpdateRequest
 from app.vendors.services import _get_vendor_coupon
 from sqlalchemy.exc import IntegrityError
@@ -738,6 +739,7 @@ async def vendor_update_status_order(
             .selectinload(OrderItem.menu)
             .selectinload(Menu.menus_options)
             .selectinload(MenuOptionGroup.options),
+            selectinload(Order.customer),        # top-level — loads from Order, not OrderItem
             selectinload(Order.delivery_address)
             .selectinload(DeliveryAddress.user)
         )
@@ -770,6 +772,13 @@ async def vendor_update_status_order(
 
     order.status = status_data.status
     await db.commit()
+
+    # send mail to customer
+    send_order_status_update_email.delay(
+        user_email=order.customer.email,
+        order_number=order.order_number,
+        new_status=status_data.status.value,
+    )
 
     # Re-query with full eager loads so Pydantic can serialize the menu chain
     refreshed = await db.execute(

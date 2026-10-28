@@ -1,3 +1,5 @@
+from app.tasks.auth_tasks import task_send_reset_password
+from app.tasks.auth_tasks import task_send_verification_code
 import logging
 import hashlib
 from typing import Annotated
@@ -175,7 +177,6 @@ async def verify_email(
 async def resend_verification(
     request: Request,
     request_data: ResendVerificationRequest,
-    background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
     results = await db.execute(
@@ -203,8 +204,7 @@ async def resend_verification(
         db.add(verification_code_obj)
         await db.commit()
 
-        background_tasks.add_task(
-            send_verification_code_email,
+        task_send_verification_code.delay(
             to_email=user.email,
             code=code,
             username=user.first_name or user.email
@@ -460,8 +460,7 @@ async def forgot_password(
         db.add(reset_token_obj)
         await db.commit()
 
-        background_tasks.add_task(
-            send_reset_password_email,
+        task_send_reset_password.delay(
             to_email=user.email,
             reset_token=token,
             username=user.first_name or user.email
