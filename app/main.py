@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from app.core.database import engine
 from app.core.response import api_response
 from app.auth.routes import router as auth_router
@@ -11,7 +12,8 @@ from app.customers.routes import router as customers_router
 from app.vendors.routes import router as vendors_router
 from app.riders.routes import router as riders_router
 from app.health.routes import router as health_router
-import app.models as _models_init  # Ensures SQLAlchemy models are registered with Base.metadata
+# Ensures SQLAlchemy models are registered with Base.metadata
+import app.models as _models_init
 import logging
 from sqlalchemy import text
 import redis.asyncio as redis
@@ -71,6 +73,24 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+ALLOWED_ORIGINS = [
+    settings.frontend_url,
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "*"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
+)
 
 # Attach limiter to FastAPI app state
 app.state.limiter = limiter
@@ -150,10 +170,17 @@ async def global_unhandled_exception_handler(request: Request, exc: Exception):
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
 
+    # Prevent your API responses from being embedded in iframes on other sites
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
 
+    # Prevent browsers from MIME-sniffing the content type (e.g. treating a
+    # JSON response as HTML and executing injected scripts)
     response.headers["X-Content-Type-Options"] = "nosniff"
 
+    # Tell browsers to activate their built-in XSS filter
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+
+    # Control how much referrer info is sent when navigating away from your API
     if "Referrer-Policy" not in response.headers:
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
